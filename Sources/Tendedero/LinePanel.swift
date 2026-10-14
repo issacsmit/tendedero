@@ -1,17 +1,29 @@
 import AppKit
 import SwiftUI
 
-/// SwiftUI can reset the cursor during mouse movement. Own the rope's cursor
-/// region at the AppKit level so the affordance stays visible while hovering.
+/// Route rope hits to an AppKit responder instead of SwiftUI's empty background.
+/// An inactive panel receives activeAlways mouse tracking, but AppKit explicitly
+/// does not deliver cursorUpdate for that scope.
 final class RopeHostingView: NSHostingView<LineView> {
     weak var ropePull: RopePull?
     private var ropeTracking: NSTrackingArea?
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if let window {
+            let local = convert(point, from: superview)
+            let screen = window.convertPoint(toScreen: convert(local, to: nil))
+            if ropePull?.canGrab(at: screen) == true { return self }
+        }
+        return super.hitTest(point)
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         if let ropeTracking { removeTrackingArea(ropeTracking) }
         let tracking = NSTrackingArea(rect: .zero,
-            options: [.inVisibleRect, .activeAlways, .cursorUpdate, .mouseMoved, .mouseEnteredAndExited],
+            options: [.inVisibleRect, .activeAlways, .mouseMoved, .mouseEnteredAndExited],
             owner: self)
         addTrackingArea(tracking)
         ropeTracking = tracking
@@ -30,23 +42,25 @@ final class RopeHostingView: NSHostingView<LineView> {
     }
 
     override func cursorUpdate(with event: NSEvent) {
-        super.cursorUpdate(with: event)
-        updateRopeCursor()
+        if !updateRopeCursor(with: event) { super.cursorUpdate(with: event) }
     }
 
     override func mouseMoved(with event: NSEvent) {
-        super.mouseMoved(with: event)
-        updateRopeCursor()
+        if !updateRopeCursor(with: event) { super.mouseMoved(with: event) }
     }
 
     override func mouseEntered(with event: NSEvent) {
-        super.mouseEntered(with: event)
-        updateRopeCursor()
+        if !updateRopeCursor(with: event) { super.mouseEntered(with: event) }
     }
 
-    private func updateRopeCursor() {
-        if ropePull?.isDragging == true { NSCursor.closedHand.set() }
-        else if ropePull?.canGrab(at: NSEvent.mouseLocation) == true { NSCursor.openHand.set() }
+    override func mouseExited(with event: NSEvent) {
+        (window as? LinePanel)?.updateRopeCursor(at: NSEvent.mouseLocation)
+        super.mouseExited(with: event)
+    }
+
+    private func updateRopeCursor(with event: NSEvent) -> Bool {
+        guard let panel = window as? LinePanel else { return false }
+        return panel.updateRopeCursor(at: panel.convertPoint(toScreen: event.locationInWindow))
     }
 }
 
@@ -55,6 +69,7 @@ final class RopeHostingView: NSHostingView<LineView> {
 /// and lets clicks pass through everywhere except photos and the grabbable rope.
 final class LinePanel: NSPanel {
     weak var ropePull: RopePull?
+    private var ownsRopeCursor = false
     init(content: NSView) {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
@@ -68,6 +83,7 @@ final class LinePanel: NSPanel {
         hidesOnDeactivate = false
         isMovable = false
         becomesKeyOnlyIfNeeded = true
+        acceptsMouseMovedEvents = true
         ignoresMouseEvents = true
         contentView = content
     }
@@ -75,8 +91,35 @@ final class LinePanel: NSPanel {
     /// Two-finger swipes and the scroll wheel, for moving along a long line.
     var onScroll: ((NSEvent) -> Void)?
 
+    @discardableResult
+    func updateRopeCursor(at screenPoint: CGPoint) -> Bool {
+        let dragging = ropePull?.isDragging == true
+        let hovering = !ignoresMouseEvents && ropePull?.canGrab(at: screenPoint) == true
+        if dragging || hovering {
+            (dragging ? NSCursor.closedHand : NSCursor.openHand).set()
+            ownsRopeCursor = true
+            return true
+        }
+        if ownsRopeCursor {
+            NSCursor.arrow.set()
+            ownsRopeCursor = false
+        }
+        return false
+    }
+
+    override func orderOut(_ sender: Any?) {
+        if ownsRopeCursor { NSCursor.arrow.set(); ownsRopeCursor = false }
+        super.orderOut(sender)
+    }
+
     override func sendEvent(_ event: NSEvent) {
         let screenPoint = convertPoint(toScreen: event.locationInWindow)
+        if event.type == .mouseMoved {
+            // Handle even when a SwiftUI child would otherwise consume the event.
+            super.sendEvent(event)
+            updateRopeCursor(at: screenPoint)
+            return
+        }
         if let ropePull {
             if event.type == .leftMouseDown, ropePull.begin(at: screenPoint) { return }
             if ropePull.isDragging {

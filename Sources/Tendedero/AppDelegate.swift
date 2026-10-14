@@ -601,6 +601,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !GrabView.isDragging else { return }
         if ropePull.isActive {
             panel.ignoresMouseEvents = !ropePull.isDragging
+            panel.updateRopeCursor(at: mouse)
             return
         }
         let local = panel.convertPoint(fromScreen: mouse)
@@ -616,13 +617,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if overRope != showingRopeCursor, let content = panel.contentView {
             panel.invalidateCursorRects(for: content)
         }
-        if overRope { NSCursor.openHand.set() }
-        else if showingRopeCursor { NSCursor.arrow.set() }
         showingRopeCursor = overRope
         let accepts = overPhoto || overRope
         if panel.ignoresMouseEvents == accepts {
             panel.ignoresMouseEvents = !accepts
         }
+        // Establish ownership of mouse events before asking AppKit to show
+        // this background panel's cursor.
+        panel.updateRopeCursor(at: mouse)
     }
 
     // MARK: Shortcut

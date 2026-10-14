@@ -189,4 +189,58 @@ struct BatchClearTests {
             drawing.cacheDisplay(in: drawing.bounds, to: bitmap)
         }
     }
+
+    @Test func ropeHoverRoutesToNativeViewWithoutTakingKeyFocus() throws {
+        _ = NSApplication.shared
+        let (dir, defaults, suite) = try fixture()
+        defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: dir) }
+        let line = Line(defaults: defaults, inboxFolder: dir.appendingPathComponent("inbox"))
+        line.hang(try image(dir, "hover"), quietly: true)
+        line.revealed = true
+        let host = RopeHostingView(rootView: LineView(line: line))
+        host.sizingOptions = []
+        let panel = LinePanel(content: host)
+        panel.placeOnScreen()
+        let pull = RopePull(line: line, panel: panel)
+        panel.ropePull = pull
+        host.ropePull = pull
+        panel.orderFrontRegardless()
+        panel.ignoresMouseEvents = false
+        defer { pull.interrupt(); panel.orderOut(nil); NSCursor.arrow.set() }
+        host.updateTrackingAreas()
+        #expect(panel.acceptsMouseMovedEvents)
+        let tracking = try #require(host.trackingAreas.first { ($0.owner as? RopeHostingView) === host })
+        #expect(tracking.options.contains(.activeAlways))
+        #expect(tracking.options.contains(.mouseMoved))
+        #expect(!tracking.options.contains(.cursorUpdate))
+        let x = panel.frame.width * 0.25
+        let location = CGPoint(x: x, y: panel.frame.height - Layout.ropeY(x: x, width: panel.frame.width))
+        let local = host.superview!.convert(location, from: nil)
+        #expect(host.hitTest(local) === host)
+        let activeBeforeHover = NSApp.isActive
+        let keyBeforeHover = NSApp.keyWindow
+
+        func move(to location: CGPoint) throws {
+            let event = try #require(NSEvent.mouseEvent(with: .mouseMoved, location: location,
+                modifierFlags: [], timestamp: 0, windowNumber: panel.windowNumber, context: nil,
+                eventNumber: 0, clickCount: 0, pressure: 0))
+            panel.sendEvent(event)
+        }
+        NSCursor.arrow.set()
+        try move(to: location)
+        #expect(NSCursor.current === NSCursor.openHand)
+        #expect(NSApp.isActive == activeBeforeHover)
+        #expect(NSApp.keyWindow === keyBeforeHover)
+        try move(to: CGPoint(x: x, y: location.y - 70))
+        #expect(NSCursor.current === NSCursor.arrow)
+
+        // Receiving an old move after hide/click-through must not leave a hand.
+        panel.ignoresMouseEvents = true
+        try move(to: location)
+        #expect(NSCursor.current === NSCursor.arrow)
+        panel.ignoresMouseEvents = false
+        try move(to: location)
+        panel.orderOut(nil)
+        #expect(NSCursor.current === NSCursor.arrow)
+    }
 }
