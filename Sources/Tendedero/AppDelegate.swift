@@ -7,8 +7,16 @@ import SwiftUI
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
-    private let line = Line()
+    private let line: Line
+
+    init(line: Line) {
+        self.line = line
+        super.init()
+    }
     private var panel: LinePanel!
+    private var ropePull: RopePull!
+    private var pendingCaptures: [URL] = []
+    private var showingRopeCursor = false
     private var statusItem: NSStatusItem!
     private var watcher: ScreenshotWatcher!
     /// In inbox mode, a second watcher on the Desktop. If a macOS version
@@ -64,11 +72,54 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let host = NSHostingView(rootView: LineView(line: line))
+        let host = RopeHostingView(rootView: LineView(line: line))
         host.sizingOptions = []
         panel = LinePanel(content: host)
         panel.placeOnScreen()
         updateCapacity()
+        ropePull = RopePull(line: line, panel: panel)
+        panel.ropePull = ropePull
+        host.ropePull = ropePull
+        ropePull.onFinish = { [weak self] cleared in
+            guard let self else { return }
+            if cleared && self.line.liveCount == 0 {
+                self.keepOpen = false
+                self.wanted = false
+                self.refresh()
+            } else {
+                self.peekUntil = Date().addingTimeInterval(1)
+            }
+            let captures = self.pendingCaptures
+            self.pendingCaptures.removeAll()
+            for url in captures { self.hangCapture(url) }
+        }
+
+        #if DEBUG
+        if CommandLine.arguments.contains("--rope-demo") {
+            setUpStatusItem()
+            let menu = NSMenu()
+            menu.addItem(ClosureMenuItem("Reset demo") { [weak self] in
+                guard let self else { return }
+                self.ropePull.interrupt()
+                _ = self.line.discardForRope(Set(self.line.items.map(\.id)))
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) {
+                    RopeDemo.populate(self.line)
+                    self.keepOpen = true
+                    self.wanted = true
+                    self.refresh()
+                    self.reveal(pinned: true)
+                }
+            })
+            menu.addItem(ClosureMenuItem("Quit demo", key: "q") { NSApp.terminate(nil) })
+            statusItem.menu = menu
+            RopeDemo.populate(line)
+            keepOpen = true
+            wanted = true
+            refresh()
+            reveal(pinned: true)
+            return
+        }
+        #endif
 
         if Inbox.isEnabled { Inbox.apply() }
         restoreSettingsOnTermination()
@@ -104,6 +155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for name in [NSWorkspace.activeSpaceDidChangeNotification, NSWorkspace.didActivateApplicationNotification] {
             workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
+                    self?.ropePull.interrupt()
                     self?.refresh()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { self?.refresh() }
                 }
@@ -114,6 +166,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
+                self?.ropePull.interrupt()
                 self?.panel.placeOnScreen()
                 self?.updateCapacity()
             }
@@ -139,6 +192,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        ropePull?.onFinish = nil
+        ropePull?.interrupt()
+        panel?.resetRopeCursor()
+        #if DEBUG
+        if CommandLine.arguments.contains("--rope-demo") { return }
+        #endif
         if Inbox.isEnabled { Inbox.restore() }
     }
 
@@ -224,7 +283,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             "Screenshots will hang on the line the instant you take them, without the floating thumbnail, and will not pile up on your Desktop. Drag one to a folder to keep it, or discard it with the cross. You can turn this off from the menu bar, and your settings come back when Tendedero quits.")
         alert.addButton(withTitle: L("Turn on"))
         alert.addButton(withTitle: L("Not now"))
-        if let icon = NSImage(named: "Tendedero") ?? NSApp.applicationIconImage { alert.icon = icon }
+        if let icon = NSApp.applicationIconImage { alert.icon = icon }
         NSApp.activate(ignoringOtherApps: true)
         if alert.runModal() == .alertFirstButtonReturn { setInbox(true) }
     }
@@ -255,9 +314,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// An empty line goes away, unless it was opened on purpose.
     private func itemsChanged() {
-        guard line.liveCount == 0, !keepOpen else { return }
+        guard line.liveCount == 0, !keepOpen, !line.ropeInteractionActive else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { [weak self] in
-            guard let self, self.line.liveCount == 0, !self.keepOpen else { return }
+            guard let self, self.line.liveCount == 0, !self.keepOpen, !self.line.ropeInteractionActive else { return }
             self.wanted = false
             self.refresh()
         }
@@ -278,6 +337,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// A new screenshot lifts off from where it was taken and flies to its
     /// place on the line. Without a known capture area it simply drops in.
     private func hangCapture(_ url: URL) {
+        if ropePull.isActive {
+            if !pendingCaptures.contains(url) { pendingCaptures.append(url) }
+            return
+        }
         let from = captureRect(of: url)
         let screen = from.flatMap { from in
             NSScreen.screens.first { NSMouseInRect(CGPoint(x: from.midX, y: from.midY), $0.frame, false) }
@@ -383,6 +446,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func setRevealed(_ on: Bool) {
+        if !on, ropePull?.isActive == true { ropePull.interrupt() }
         guard on != isRevealed else { return }
         isRevealed = on
         line.revealed = on
@@ -518,7 +582,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if inside && pinned { pinned = false }
 
         let busy = pinned || GrabView.isDragging || GrabView.isShowingMenu
-            || line.pressedID != nil || now < peekUntil
+            || line.pressedID != nil || now < peekUntil || ropePull.isActive
         if inside || busy {
             awaySince = nil
         } else {
@@ -536,6 +600,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// whatever is underneath.
     private func updateMousePassThrough(_ mouse: NSPoint) {
         guard !GrabView.isDragging else { return }
+        if ropePull.isActive {
+            panel.ignoresMouseEvents = !ropePull.isDragging
+            panel.updateRopeCursor(at: mouse)
+            return
+        }
         let local = panel.convertPoint(fromScreen: mouse)
         let flipped = CGPoint(x: local.x, y: panel.frame.height - local.y)
         var overPhoto = line.hitRects.values.contains { $0.insetBy(dx: -4, dy: -4).contains(flipped) }
@@ -545,9 +614,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let band = line.hitRects.values.reduce(CGRect.null) { $0.union($1) }
             overPhoto = !band.isNull && flipped.y >= band.minY - 4 && flipped.y <= band.maxY + 4
         }
-        if panel.ignoresMouseEvents == overPhoto {
-            panel.ignoresMouseEvents = !overPhoto
+        let overRope = ropePull.canGrab(at: mouse)
+        if overRope != showingRopeCursor, let content = panel.contentView {
+            panel.invalidateCursorRects(for: content)
         }
+        showingRopeCursor = overRope
+        let accepts = overPhoto || overRope
+        if panel.ignoresMouseEvents == accepts {
+            panel.ignoresMouseEvents = !accepts
+        }
+        // Establish ownership of mouse events before asking AppKit to show
+        // this background panel's cursor.
+        panel.updateRopeCursor(at: mouse)
     }
 
     // MARK: Shortcut
@@ -613,12 +691,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
     }
 
-    /// The shirt fills in while copied images are hung, so it shows at a
+    /// The scissors gain a circle while copied images are hung, showing at a
     /// glance that the clipboard is being watched.
     private func updateStatusIcon() {
         let on = ClipboardWatcher.isEnabled
-        let description = on ? L("Tendedero, hanging copied images") : "Tendedero"
-        let image = NSImage(systemSymbolName: on ? "tshirt.fill" : "tshirt", accessibilityDescription: description)
+        let description = on ? L("Tendedero, hanging copied images") : "Linebreak"
+        let image = NSImage(systemSymbolName: on ? "scissors.circle.fill" : "scissors", accessibilityDescription: description)
         image?.isTemplate = true
         statusItem.button?.image = image
         statusItem.button?.toolTip = description
@@ -772,17 +850,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         })
     }
 
-    /// tendedero.app with the running version, and the menus' language when
-    /// the website has it too, so the page answers in the same words.
+    /// Updates for this fork, rather than releases of the upstream app.
     private static var updatesURL: URL {
-        var components = URLComponents(string: "https://tendedero.app/")!
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
-        var query = [URLQueryItem(name: "update", value: version)]
-        if let language = Bundle.main.preferredLocalizations.first, ["en", "es", "gl", "fr", "pt-BR", "ja", "ko", "zh-Hans"].contains(language) {
-            query.append(URLQueryItem(name: "lang", value: language))
-        }
-        components.queryItems = query
-        return components.url!
+        URL(string: "https://github.com/issacsmit/tendedero/releases")!
     }
 
     private static func toggleLaunchAtLogin() {
