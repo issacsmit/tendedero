@@ -34,6 +34,22 @@ swift test --disable-sandbox \
 
 Use the SDK and toolchain paths installed on the host. Full Xcode installations normally need only `swift test`.
 
-## Cursor regression (1.5.2)
+## Background cursor regression (1.5.3)
 
-The regression test sends native mouse-move events through a non-key panel with the real hosting view. It verifies native rope hit testing, open-hand / arrow transitions, click-through cleanup and unchanged app/key-window focus. This checks event routing and the application cursor; physical hover and the cursor displayed by WindowServer still require a user check. Apple documents the tracking-scope restriction under [activeAlways](https://developer.apple.com/documentation/appkit/nstrackingarea/options-swift.struct/activealways).
+Version 1.5.2 fixed event routing but still left the visible cursor unchanged: `NSCursor.current` reports the application's cursor, which can differ from the cursor displayed by WindowServer while another app is frontmost. A negative-control screen capture reproduced this: calling `NSCursor.openHand.set()` from the inactive app still displayed an arrow.
+
+`RopeCursor` enables the undocumented WindowServer connection property `SetsCursorInBackground` for the rope hover/drag only. Reset restores the visible cursor before disabling that access. Leaving the hit band, releasing/cancelling, hiding the panel, and quitting all reset it. Hover does not activate the app or make its panel key. During a drag the nonactivating panel can become key to receive Escape; the foreground application stays unchanged.
+
+The two symbols are resolved dynamically. If a future macOS removes the API or rejects the property, ordinary AppKit cursor handling remains available and dragging still works, but inactive hover may again show an arrow. This workaround needs rechecking on future macOS releases and is unsuitable for a Mac App Store build.
+
+Eleven automated checks cover geometry, clear behavior, native event routing, cursor access lifetime and the unavailable-API fallback. The separate opt-in `captureSystemCursorOverNativeRope` test places the actual hosting view under the stationary pointer and captures small screen regions with the system cursor included. It uses temporary sample images and preferences, without watchers or changes to screenshot settings. The seven inspected captures show: unchanged arrow in the negative control, open hand on hover, closed hand while held, arrow on release, open hand on re-entry, restoration on click-through and restoration on hide. The foreground application's PID stayed unchanged throughout. This validates the system-rendered cursor, not just `NSCursor.current`; it does not automate a physical mouse drag.
+
+Run the screen check separately from the other window tests, with the pointer stationary away from screen edges and screen-capture access available to the test host:
+
+```sh
+mkdir -p /tmp/linebreak-cursor-proof
+LINEBREAK_CURSOR_PROOF=/tmp/linebreak-cursor-proof \
+swift test --filter captureSystemCursorOverNativeRope
+```
+
+Use the toolchain workaround above where needed. Inspect the output PNGs; the test asserts focus and gesture state, not the appearance of the captured pixels. Apple documents the tracking-scope restriction under [activeAlways](https://developer.apple.com/documentation/appkit/nstrackingarea/options-swift.struct/activealways) and the application-local cursor under [current](https://developer.apple.com/documentation/appkit/nscursor/current).

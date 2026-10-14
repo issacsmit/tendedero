@@ -72,7 +72,7 @@ final class RopePull {
         window.orderFrontRegardless()
         panel.ignoresMouseEvents = false
         panel.makeKey()
-        NSCursor.closedHand.set()
+        panel.updateRopeCursor(at: screenPoint)
         view.needsDisplay = true
         return true
     }
@@ -81,7 +81,7 @@ final class RopePull {
         guard isDragging, let drawing else { return }
         drawing.motion.drag(by: CGSize(width: screenPoint.x - origin.x, height: origin.y - screenPoint.y))
         drawing.needsDisplay = true
-        NSCursor.closedHand.set()
+        panel?.updateRopeCursor(at: screenPoint)
     }
 
     func release(cancelled: Bool = false) {
@@ -100,7 +100,7 @@ final class RopePull {
             phase = .returning
         }
         panel?.resignKey()
-        NSCursor.arrow.set()
+        panel?.resetRopeCursor()
         drawing.phase = phase
         if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
             finish()
@@ -141,7 +141,7 @@ final class RopePull {
         selected = []
         phase = .idle
         panel?.resignKey()
-        NSCursor.arrow.set()
+        panel?.resetRopeCursor()
         if committed && line.liveCount == 0 {
             // Do not flash a fresh, unbroken rope between the overlay fading
             // and AppDelegate hiding the empty line.

@@ -194,6 +194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         ropePull?.onFinish = nil
         ropePull?.interrupt()
+        panel?.resetRopeCursor()
         #if DEBUG
         if CommandLine.arguments.contains("--rope-demo") { return }
         #endif

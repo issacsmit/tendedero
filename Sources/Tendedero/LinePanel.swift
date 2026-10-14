@@ -69,7 +69,7 @@ final class RopeHostingView: NSHostingView<LineView> {
 /// and lets clicks pass through everywhere except photos and the grabbable rope.
 final class LinePanel: NSPanel {
     weak var ropePull: RopePull?
-    private var ownsRopeCursor = false
+    private let ropeCursor = RopeCursor()
     init(content: NSView) {
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
                    backing: .buffered, defer: false)
@@ -93,22 +93,20 @@ final class LinePanel: NSPanel {
 
     @discardableResult
     func updateRopeCursor(at screenPoint: CGPoint) -> Bool {
-        let dragging = ropePull?.isDragging == true
-        let hovering = !ignoresMouseEvents && ropePull?.canGrab(at: screenPoint) == true
+        let dragging = isVisible && ropePull?.isDragging == true
+        let hovering = isVisible && !ignoresMouseEvents && ropePull?.canGrab(at: screenPoint) == true
         if dragging || hovering {
-            (dragging ? NSCursor.closedHand : NSCursor.openHand).set()
-            ownsRopeCursor = true
+            ropeCursor.set(dragging ? .closedHand : .openHand)
             return true
         }
-        if ownsRopeCursor {
-            NSCursor.arrow.set()
-            ownsRopeCursor = false
-        }
+        resetRopeCursor()
         return false
     }
 
+    func resetRopeCursor() { ropeCursor.reset() }
+
     override func orderOut(_ sender: Any?) {
-        if ownsRopeCursor { NSCursor.arrow.set(); ownsRopeCursor = false }
+        resetRopeCursor()
         super.orderOut(sender)
     }
 
