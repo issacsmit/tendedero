@@ -178,8 +178,15 @@ struct BatchClearTests {
         try mouse(.leftMouseDown)
         try mouse(.leftMouseDragged, down: 400)
         #expect(line.liveCount == 1)
+        let drawing = try #require(NSApp.windows.compactMap { $0.contentView as? RopeDrawing }.first)
+        let bitmap = try #require(drawing.bitmapImageRepForCachingDisplay(in: drawing.bounds))
+        drawing.cacheDisplay(in: drawing.bounds, to: bitmap)
         try mouse(.leftMouseUp, down: 400)
         #expect(pull.phase == .breaking && line.liveCount == 0)
         #expect(defaults.stringArray(forKey: "pegged") == [])
+        for time in [0.0, 0.5, 1.5, 2.5] {
+            drawing.time = time
+            drawing.cacheDisplay(in: drawing.bounds, to: bitmap)
+        }
     }
 }
